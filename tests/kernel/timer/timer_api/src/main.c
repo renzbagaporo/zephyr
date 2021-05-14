@@ -82,7 +82,10 @@ static void init_timer_data(void)
 	tdata.expire_cnt = 0;
 	tdata.stop_cnt = 0;
 
-	k_usleep(1); /* align to tick */
+	if (IS_ENABLED(CONFIG_MULTITHREADING)) {
+		k_usleep(1); /* align to tick */
+	}
+
 	tdata.timestamp = k_uptime_get();
 }
 
@@ -235,7 +238,7 @@ void test_timer_restart(void)
  * @brief Test Timer with zero period value
  *
  * Validates initial timer duration, keeping timer period to zero.
- * Basically, acting as one-short timer.
+ * Basically, acting as one-shot timer.
  * It initializes the timer with k_timer_init(), then starts the timer
  * using k_timer_start() with specific initial duration and period as
  * zero. Stops the timer using k_timer_stop() and checks for proper
@@ -255,12 +258,52 @@ void test_timer_period_0(void)
 			      - BUSY_SLEW_THRESHOLD_TICKS(DURATION
 							  * USEC_PER_MSEC)),
 		      K_NO_WAIT);
-	busy_wait_ms(DURATION + 1);
+	/* Need to wait at least 2 durations to ensure one-shot behavior. */
+	busy_wait_ms(2 * DURATION + 1);
 
-	/** TESTPOINT: ensure it is one-short timer */
+	/** TESTPOINT: ensure it is one-shot timer */
 	TIMER_ASSERT((tdata.expire_cnt == 1)
 		     || (INEXACT_MS_CONVERT
 			 && (tdata.expire_cnt == 0)), &period0_timer);
+	TIMER_ASSERT(tdata.stop_cnt == 0, &period0_timer);
+
+	/* cleanup environemtn */
+	k_timer_stop(&period0_timer);
+}
+
+/**
+ * @brief Test Timer with K_FOREVER period value
+ *
+ * Validates initial timer duration, keeping timer period to K_FOREVER.
+ * Basically, acting as one-shot timer.
+ * It initializes the timer with k_timer_init(), then starts the timer
+ * using k_timer_start() with specific initial duration and period as
+ * zero. Stops the timer using k_timer_stop() and checks for proper
+ * completion.
+ *
+ * @ingroup kernel_timer_tests
+ *
+ * @see k_timer_init(), k_timer_start(), k_timer_stop(), k_uptime_get(),
+ * k_busy_wait()
+ */
+void test_timer_period_k_forever(void)
+{
+	init_timer_data();
+	/** TESTPOINT: set period 0 */
+	k_timer_start(
+		&period0_timer,
+		K_TICKS(k_ms_to_ticks_floor32(DURATION) -
+			BUSY_SLEW_THRESHOLD_TICKS(DURATION * USEC_PER_MSEC)),
+		K_FOREVER);
+	tdata.timestamp = k_uptime_get();
+
+	/* Need to wait at least 2 durations to ensure one-shot behavior. */
+	busy_wait_ms(2 * DURATION + 1);
+
+	/** TESTPOINT: ensure it is one-shot timer */
+	TIMER_ASSERT((tdata.expire_cnt == 1) ||
+			     (INEXACT_MS_CONVERT && (tdata.expire_cnt == 0)),
+		     &period0_timer);
 	TIMER_ASSERT(tdata.stop_cnt == 0, &period0_timer);
 
 	/* cleanup environemtn */
@@ -600,7 +643,15 @@ void test_timer_user_data(void)
 			      K_NO_WAIT);
 	}
 
-	k_msleep(50 * ii + 50);
+	uint32_t wait_ms = 50 * ii + 50;
+
+	if (IS_ENABLED(CONFIG_MULTITHREADING)) {
+		k_msleep(wait_ms);
+	} else {
+		uint32_t wait_us = 1000 * wait_ms;
+
+		k_busy_wait(wait_us + (wait_us * BUSY_TICK_SLEW_PPM) / PPM_DIVISOR);
+	}
 
 	for (ii = 0; ii < 5; ii++) {
 		k_timer_stop(user_data_timer[ii]);
@@ -712,7 +763,10 @@ void test_timeout_abs(void)
 	 */
 	init_timer_data();
 	k_timer_start(&remain_timer, t, K_FOREVER);
-	k_usleep(1);
+
+	if (IS_ENABLED(CONFIG_MULTITHREADING)) {
+		k_usleep(1);
+	}
 
 	do {
 		t0 = k_uptime_ticks();
@@ -731,6 +785,11 @@ void test_timeout_abs(void)
 
 void test_sleep_abs(void)
 {
+	if (!IS_ENABLED(CONFIG_MULTITHREADING)) {
+		/* k_sleep is not supported when multithreading is off. */
+		return;
+	}
+
 	const int sleep_ticks = 50;
 	int64_t start, end;
 
@@ -755,7 +814,10 @@ void test_sleep_abs(void)
 static void timer_init(struct k_timer *timer, k_timer_expiry_t expiry_fn,
 		       k_timer_stop_t stop_fn)
 {
-	k_object_access_grant(timer, k_current_get());
+	if (IS_ENABLED(CONFIG_MULTITHREADING)) {
+		k_object_access_grant(timer, k_current_get());
+	}
+
 	k_timer_init(timer, expiry_fn, stop_fn);
 }
 
@@ -771,14 +833,17 @@ void test_main(void)
 	timer_init(&status_sync_timer, duration_expire, duration_stop);
 	timer_init(&remain_timer, duration_expire, duration_stop);
 
-	k_thread_access_grant(k_current_get(), &ktimer, &timer0, &timer1,
+	if (IS_ENABLED(CONFIG_MULTITHREADING)) {
+		k_thread_access_grant(k_current_get(), &ktimer, &timer0, &timer1,
 			      &timer2, &timer3, &timer4);
+	}
 
 	ztest_test_suite(timer_api,
 			 ztest_unit_test(test_time_conversions),
 			 ztest_user_unit_test(test_timer_duration_period),
 			 ztest_user_unit_test(test_timer_restart),
 			 ztest_user_unit_test(test_timer_period_0),
+			 ztest_user_unit_test(test_timer_period_k_forever),
 			 ztest_user_unit_test(test_timer_expirefn_null),
 			 ztest_user_unit_test(test_timer_periodicity),
 			 ztest_user_unit_test(test_timer_status_get),
